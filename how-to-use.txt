@@ -1,0 +1,9 @@
+How to use these scripts.
+
+1. Go to your ad account, and open the "Tools" menu on the left
+2. Within Tools, select "Bulk Options --> "Scripts"
+3. Click the plus (+) to add a new script and paste the code
+4. Edit the config section as desired (within the code)
+5. Click 'Save' 
+6. You will have to authorize it to run. Either click 'Preview' or 'Run' and look for the authorize button.
+7. Back on the scripts page, look for the "Frequency" column where you can add a scheduled time for the script to run
