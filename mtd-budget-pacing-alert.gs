@@ -1,5 +1,12 @@
 /**
- * Add these CONFIG fields to your existing CONFIG block:
+ * Google Ads Script: Account-level Monthly Budget Pacing Alert
+ * Monitors THIS_MONTH cost for the entire account and sends email alerts.
+ * Optional: pause all campaigns at 100% of budget.
+ *
+ * Setup:
+ * - Replace MONTHLY_BUDGET with your monthly cap (in account currency).
+ * - Add your email(s).
+ * - Schedule to run.
  */
 const CONFIG = {
   MONTHLY_BUDGET: 20000,    // your budget
