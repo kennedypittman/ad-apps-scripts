@@ -56,14 +56,11 @@ function main() {
   }
 
   // **NEW: Use completed days only (yesterday's date for calculations)**
-  // Get the start of today, then subtract 1 day to get yesterday
-  const todayStart = new Date(Utilities.formatDate(now, tz, 'yyyy-MM-dd'));
-  const yesterday = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
-  
-  // Month math based on yesterday
-  const year = parseInt(Utilities.formatDate(yesterday, tz, 'yyyy'), 10);
-  const month = parseInt(Utilities.formatDate(yesterday, tz, 'M'), 10); // 1..12
-  const dayOfMonth = parseInt(Utilities.formatDate(yesterday, tz, 'd'), 10);
+  // Calculate yesterday by subtracting 1 from today's day-of-month
+  const year = parseInt(Utilities.formatDate(now, tz, 'yyyy'), 10);
+  const month = parseInt(Utilities.formatDate(now, tz, 'M'), 10); // 1..12
+  const todayNum = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
+  const dayOfMonth = todayNum - 1; // completed days = today minus 1
   const daysInMonth = new Date(year, month, 0).getDate();
 
   // Determine effective monthly cap and expected spend by yesterday
