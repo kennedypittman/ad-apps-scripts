@@ -4,6 +4,8 @@
  * - Expected-by-today comes from DAILY if provided, else from MONTHLY / daysInMonth.
  * - Monthly cap is MONTHLY if provided; else DAILY * daysInMonth.
  * - Anti-spam cooldown + hysteresis + optional PAUSE_AT_100 included.
+ * - WEEKDAYS ONLY: Script exits if run on Saturday or Sunday
+ * - COMPLETED DAYS: Uses yesterday's date for calculations to avoid mid-day skew
  *
  * Setup:
  *   Tools & Settings → Bulk actions → Scripts → + → paste, Save, Authorize, Preview, Run once.
@@ -46,13 +48,25 @@ function main() {
   const currency = account.getCurrencyCode();
   const now = new Date();
 
-  // Month math
-  const year = parseInt(Utilities.formatDate(now, tz, 'yyyy'), 10);
-  const month = parseInt(Utilities.formatDate(now, tz, 'M'), 10); // 1..12
-  const dayOfMonth = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
+  // **NEW: Exit if weekend**
+  const dayOfWeek = parseInt(Utilities.formatDate(now, tz, 'u'), 10); // 1=Mon, 7=Sun
+  if (dayOfWeek === 6 || dayOfWeek === 7) {
+    Logger.log('Weekend detected. Skipping script execution.');
+    return;
+  }
+
+  // **NEW: Use completed days only (yesterday's date for calculations)**
+  // Get the start of today, then subtract 1 day to get yesterday
+  const todayStart = new Date(Utilities.formatDate(now, tz, 'yyyy-MM-dd'));
+  const yesterday = new Date(todayStart.getTime() - 24 * 60 * 60 * 1000);
+  
+  // Month math based on yesterday
+  const year = parseInt(Utilities.formatDate(yesterday, tz, 'yyyy'), 10);
+  const month = parseInt(Utilities.formatDate(yesterday, tz, 'M'), 10); // 1..12
+  const dayOfMonth = parseInt(Utilities.formatDate(yesterday, tz, 'd'), 10);
   const daysInMonth = new Date(year, month, 0).getDate();
 
-  // Determine effective monthly cap and expected spend by today
+  // Determine effective monthly cap and expected spend by yesterday
   const monthlyCap = deriveMonthlyCap_(daysInMonth);
   if (!isFinite_(monthlyCap) || monthlyCap <= 0) {
     throw new Error('You must set either CONFIG.MONTHLY_BUDGET or CONFIG.DAILY_BUDGET to a positive number.');
@@ -104,11 +118,11 @@ function main() {
   const lines = [
     `Account: ${account.getCustomerId()} – ${account.getName()}`,
     `Time zone: ${tz} | Currency: ${currency}`,
-    `Month days: ${daysInMonth} | Today: ${dayOfMonth}/${daysInMonth}`,
+    `Month days: ${daysInMonth} | Completed days: ${dayOfMonth}/${daysInMonth}`,
     `Monthly cap: ${fmtMoney_(monthlyCap, currency)}`,
     `Daily budget (if set): ${isFinite_(CONFIG.DAILY_BUDGET) ? fmtMoney_(CONFIG.DAILY_BUDGET, currency) : '—'}`,
     `Spend MTD: ${fmtMoney_(costMTD, currency)}`,
-    `Expected by today: ${fmtMoney_((expectedByToday), currency)}`,
+    `Expected through day ${dayOfMonth}: ${fmtMoney_((expectedByToday), currency)}`,
     `Delta vs expected: ${delta >= 0 ? '+' : ''}${fmtMoney_(delta, currency)} (${expectedByToday > 0 ? pct_((delta/expectedByToday)) : '0.0%'})`,
     `Budget used: ${pct_(pctOfBudget)}`,
     `State: ${severity}`
@@ -128,7 +142,7 @@ function main() {
     setState_(state);
   }
 
-  // Optional: daily summary (you’ve disabled it by default)
+  // Optional: daily summary (you've disabled it by default)
   if (CONFIG.SEND_DAILY_SUMMARY) {
     const hour = parseInt(Utilities.formatDate(now, tz, 'H'), 10);
     const today = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
