@@ -144,8 +144,8 @@ function buildUniqueUrlList_(entities) {
   const out = [];
   for (const e of entities) {
     const key = e.resolvedUrl.trim();
-    if (seen[key]) { 
-      continue; 
+    if (seen[key]) {
+      continue;
     }
     seen[key] = true;
     out.push(e);
@@ -178,26 +178,14 @@ function resolveUrl_(finalUrl, trackingTemplate, finalSuffix) {
   return url;
 }
 
-/** Try HEAD first; fall back to GET if server doesn't support HEAD. */
+/** Fetch URL using GET, follow redirects, return status. */
 function checkUrl_(url) {
-  try {
-    const result = fetchUrl_(url, 'head');
-    if (result.status === 405 || result.status === 501) {
-      return fetchUrl_(url, 'get');
-    }
-    return result;
-  } catch (e) {
-    return { ok: false, status: -1, reason: `Exception: ${String(e).slice(0, 180)}` };
-  }
-}
-
-function fetchUrl_(url, method) {
   try {
     const start = new Date().getTime();
     const resp = UrlFetchApp.fetch(url, {
       followRedirects: true,
       muteHttpExceptions: true,
-      method: method,
+      method: 'get',
       validateHttpsCertificates: true,
       headers: { 'User-Agent': CONFIG.USER_AGENT }
     });
