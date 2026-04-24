@@ -8,7 +8,7 @@
  */
 
 const CONFIG = {
-  EMAILS: ['you@yourdomain.com'],   // ← where to send alerts
+  EMAILS: ['your_email@whatever.com'],   // ← where to send alerts
   CHECK_PAUSED: false,               // include paused ads/keywords? usually false
   MAX_URLS_PER_RUN: 1000,            // 0 = no limit; keep sane to avoid quotas
   CONSIDER_403_AS_FAIL: true,        // 403 often means blocked = treat as broken
@@ -145,7 +145,6 @@ function buildUniqueUrlList_(entities) {
   for (const e of entities) {
     const key = e.resolvedUrl.trim();
     if (seen[key]) { 
-      // keep at least one reference (first one kept)
       continue; 
     }
     seen[key] = true;
@@ -158,12 +157,15 @@ function buildUniqueUrlList_(entities) {
 function resolveUrl_(finalUrl, trackingTemplate, finalSuffix) {
   let url = String(finalUrl).trim();
 
+  // Decode if accidentally double-encoded
+  if (url.startsWith('http%3A') || url.startsWith('https%3A')) {
+    url = decodeURIComponent(url);
+  }
+
   if (trackingTemplate) {
-    // Replace {lpurl} with encoded final URL
     let t = String(trackingTemplate);
     t = t.replace(/\{lpurl\}/gi, encodeURIComponent(url));
     t = t.replace(/\{ignore\}/gi, '');
-    // Remove other value track macros so they don't break fetch
     t = t.replace(/\{[^\}]+\}/g, '');
     url = t;
   }
@@ -176,20 +178,31 @@ function resolveUrl_(finalUrl, trackingTemplate, finalSuffix) {
   return url;
 }
 
-/** Fetch URL, follow redirects, return status. Treat 4xx/5xx (and 403 if configured) as failures. */
+/** Try HEAD first; fall back to GET if server doesn't support HEAD. */
 function checkUrl_(url) {
+  try {
+    const result = fetchUrl_(url, 'head');
+    if (result.status === 405 || result.status === 501) {
+      return fetchUrl_(url, 'get');
+    }
+    return result;
+  } catch (e) {
+    return { ok: false, status: -1, reason: `Exception: ${String(e).slice(0, 180)}` };
+  }
+}
+
+function fetchUrl_(url, method) {
   try {
     const start = new Date().getTime();
     const resp = UrlFetchApp.fetch(url, {
       followRedirects: true,
       muteHttpExceptions: true,
-      method: 'get',
+      method: method,
       validateHttpsCertificates: true,
       headers: { 'User-Agent': CONFIG.USER_AGENT }
     });
     const code = resp.getResponseCode();
 
-    // Soft timeout guard
     const took = new Date().getTime() - start;
     if (took > CONFIG.TIMEOUT_MS) {
       return { ok: false, status: code, reason: `Timeout>${CONFIG.TIMEOUT_MS}ms` };
@@ -200,7 +213,7 @@ function checkUrl_(url) {
     if (ok2xx3xx && !is403) return { ok: true, status: code, reason: 'OK' };
     return { ok: false, status: code, reason: httpReason_(code) };
   } catch (e) {
-    return { ok: false, status: -1, reason: `Exception: ${String(e).slice(0,180)}` };
+    return { ok: false, status: -1, reason: `Exception: ${String(e).slice(0, 180)}` };
   }
 }
 
@@ -230,7 +243,6 @@ function sendEmail_(failures, tz) {
   const now = new Date();
   const title = `Broken URL Alert – ${acct.getName()} – ${Utilities.formatDate(now, tz, 'MMM d, HH:mm')}`;
 
-  // Summarize by campaign/adgroup for quick triage
   const lines = [
     `Account: ${acct.getCustomerId()} – ${acct.getName()}`,
     `Time zone: ${tz}`,
