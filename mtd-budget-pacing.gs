@@ -6,6 +6,7 @@
  * - Anti-spam cooldown + hysteresis + optional PAUSE_AT_100 included.
  * - WEEKDAYS ONLY: Script exits if run on Saturday or Sunday
  * - COMPLETED DAYS: Uses yesterday's date for calculations to avoid mid-day skew
+ * - CAMPAIGN FILTER: If set, only campaigns whose name contains this string are counted
  *
  * Setup:
  *   Tools & Settings → Bulk actions → Scripts → + → paste, Save, Authorize, Preview, Run once.
@@ -14,8 +15,13 @@
 
 const CONFIG = {
   // === Fill ONE of these (or both). Leave the other as null. ===
-  MONTHLY_BUDGET: null,   // e.g., 20000  (account currency); leave null to derive from daily
-  DAILY_BUDGET: 600,      // e.g., 600; leave null if you only use monthly
+  MONTHLY_BUDGET: 15000,   // e.g., 20000  (account currency); leave null to derive from daily
+  DAILY_BUDGET: null,      // e.g., 600; leave null if you only use monthly
+
+  // Optional: only count campaigns whose name contains this string (case-insensitive).
+  // Set to null to count ALL campaigns in the account.
+  // Example: 'Atmo' will match "Atmo_Brand", "Search_Atmo", "atmo_remarketing", etc.
+  CAMPAIGN_FILTER: null,
 
   // Pacing bands (hysteresis)
   WARN_AHEAD_PCT: 0.15,   // enter "AHEAD" at +15% vs expected
@@ -29,7 +35,7 @@ const CONFIG = {
 
   // Enforcement & notifications
   PAUSE_AT_100: false,                 // pause all campaigns at/beyond 100% of monthly cap
-  EMAILS: ['you@yourdomain.com'],      // recipients
+  EMAILS: ['your_emails@here.com'],      // recipients
 
   // Anti-spam controls
   SEND_DAILY_SUMMARY: false,           // you asked for alerts only; keep false
@@ -48,15 +54,14 @@ function main() {
   const currency = account.getCurrencyCode();
   const now = new Date();
 
-  // **NEW: Exit if weekend**
+  // Exit if weekend
   const dayOfWeek = parseInt(Utilities.formatDate(now, tz, 'u'), 10); // 1=Mon, 7=Sun
   if (dayOfWeek === 6 || dayOfWeek === 7) {
     Logger.log('Weekend detected. Skipping script execution.');
     return;
   }
 
-  // **NEW: Use completed days only (yesterday's date for calculations)**
-  // Calculate yesterday by subtracting 1 from today's day-of-month
+  // Use completed days only (yesterday's date for calculations)
   const year = parseInt(Utilities.formatDate(now, tz, 'yyyy'), 10);
   const month = parseInt(Utilities.formatDate(now, tz, 'M'), 10); // 1..12
   const todayNum = parseInt(Utilities.formatDate(now, tz, 'd'), 10);
@@ -70,9 +75,8 @@ function main() {
   }
   const expectedByToday = deriveExpectedByToday_(dayOfMonth, daysInMonth);
 
-  // Account MTD spend
-  const stats = account.getStatsFor('THIS_MONTH');
-  const costMTD = stats.getCost();
+  // Account MTD spend — filtered by CAMPAIGN_FILTER if set, else full account
+  const costMTD = getCostMTD_();
 
   // Budget usage and deviation
   const pctOfBudget = monthlyCap > 0 ? (costMTD / monthlyCap) : 0;
@@ -106,15 +110,17 @@ function main() {
 
   let shouldAlert = false;
   if (severity === 'OK') {
-    if (severityChanged && state.lastSeverity !== 'OK') shouldAlert = true; // notify when returning to OK
+    if (severityChanged && state.lastSeverity !== 'OK') shouldAlert = true;
   } else {
     if (severityChanged || worsenedEnough || outOfCooldown) shouldAlert = true;
   }
 
   // Build lines for email/log
+  const filterNote = CONFIG.CAMPAIGN_FILTER ? `Campaigns matching: "${CONFIG.CAMPAIGN_FILTER}"` : 'Campaigns: ALL';
   const lines = [
     `Account: ${account.getCustomerId()} – ${account.getName()}`,
     `Time zone: ${tz} | Currency: ${currency}`,
+    filterNote,
     `Month days: ${daysInMonth} | Completed days: ${dayOfMonth}/${daysInMonth}`,
     `Monthly cap: ${fmtMoney_(monthlyCap, currency)}`,
     `Daily budget (if set): ${isFinite_(CONFIG.DAILY_BUDGET) ? fmtMoney_(CONFIG.DAILY_BUDGET, currency) : '—'}`,
@@ -132,14 +138,13 @@ function main() {
       `Google Ads Budget Alert – ${severity} – ${Utilities.formatDate(now, tz, 'MMM d, HH:mm')}`,
       lines.join('\n')
     );
-    // cooldown + remember last deviation/severity
     state.cooldownUntil = nowMs + CONFIG.COOLDOWN_HOURS * 3600 * 1000;
     state.lastDeviationPct = deviationPct;
     state.lastSeverity = severity;
     setState_(state);
   }
 
-  // Optional: daily summary (you've disabled it by default)
+  // Optional: daily summary
   if (CONFIG.SEND_DAILY_SUMMARY) {
     const hour = parseInt(Utilities.formatDate(now, tz, 'H'), 10);
     const today = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
@@ -154,7 +159,7 @@ function main() {
     }
   }
 
-  // Optional: pause all campaigns at/above 100% monthly cap (regardless of hours)
+  // Optional: pause all matching campaigns at/above 100% monthly cap
   if (pctOfBudget >= 1 && CONFIG.PAUSE_AT_100) {
     pauseAllCampaigns_();
   }
@@ -163,6 +168,26 @@ function main() {
 }
 
 /* ======= Helpers ======= */
+
+/** Returns MTD cost, filtered to campaigns matching CAMPAIGN_FILTER if set. */
+function getCostMTD_() {
+  if (!CONFIG.CAMPAIGN_FILTER) {
+    // No filter — use fast account-level stats
+    return AdsApp.currentAccount().getStatsFor('THIS_MONTH').getCost();
+  }
+
+  // Filter is set — sum spend only from matching campaigns
+  const filter = CONFIG.CAMPAIGN_FILTER.toLowerCase();
+  let total = 0;
+  const it = AdsApp.campaigns().get();
+  while (it.hasNext()) {
+    const campaign = it.next();
+    if (campaign.getName().toLowerCase().indexOf(filter) !== -1) {
+      total += campaign.getStatsFor('THIS_MONTH').getCost();
+    }
+  }
+  return total;
+}
 
 function deriveMonthlyCap_(daysInMonth) {
   const hasMonthly = isFinite_(CONFIG.MONTHLY_BUDGET) && CONFIG.MONTHLY_BUDGET > 0;
@@ -175,20 +200,16 @@ function deriveMonthlyCap_(daysInMonth) {
 function deriveExpectedByToday_(dayOfMonth, daysInMonth) {
   const hasDaily = isFinite_(CONFIG.DAILY_BUDGET) && CONFIG.DAILY_BUDGET > 0;
   if (hasDaily) return CONFIG.DAILY_BUDGET * dayOfMonth;
-  // else derive from monthly pacing
   const monthly = deriveMonthlyCap_(daysInMonth);
   return (monthly / daysInMonth) * dayOfMonth;
 }
 
 function classifySeverity_(pctOfBudget, expectedByToday, delta) {
-  // Default state
   let sev = 'OK';
-  // Ahead/behind vs expected (enter thresholds)
   if (expectedByToday > 0) {
     if (delta > expectedByToday * CONFIG.WARN_AHEAD_PCT) sev = 'AHEAD';
     if (delta < -expectedByToday * CONFIG.WARN_BEHIND_PCT) sev = 'BEHIND';
   }
-  // Near/critical/cap override based on budget %
   if (pctOfBudget >= CONFIG.WARN_AT_PCT && pctOfBudget < CONFIG.CRITICAL_AT_PCT) sev = 'NEAR';
   if (pctOfBudget >= CONFIG.CRITICAL_AT_PCT && pctOfBudget < 1) sev = 'CRITICAL';
   if (pctOfBudget >= 1) sev = 'CAP';
@@ -196,6 +217,7 @@ function classifySeverity_(pctOfBudget, expectedByToday, delta) {
 }
 
 function pauseAllCampaigns_() {
+  const filter = CONFIG.CAMPAIGN_FILTER ? CONFIG.CAMPAIGN_FILTER.toLowerCase() : null;
   const groups = [
     () => AdsApp.campaigns().withCondition("Status = ENABLED").get(),
     () => typeof AdsApp.shoppingCampaigns === 'function' ? AdsApp.shoppingCampaigns().withCondition("Status = ENABLED").get() : null,
@@ -206,7 +228,12 @@ function pauseAllCampaigns_() {
   for (const g of groups) {
     const it = g && g();
     if (!it) continue;
-    while (it.hasNext()) it.next().pause();
+    while (it.hasNext()) {
+      const campaign = it.next();
+      if (!filter || campaign.getName().toLowerCase().indexOf(filter) !== -1) {
+        campaign.pause();
+      }
+    }
   }
 }
 
