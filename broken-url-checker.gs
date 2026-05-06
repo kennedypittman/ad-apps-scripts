@@ -8,7 +8,7 @@
  */
 
 const CONFIG = {
-  EMAILS: ['your_email@whatever.com'],   // ← where to send alerts
+  EMAILS: ['your.email@here.com'],   // ← where to send alerts
   CHECK_PAUSED: false,               // include paused ads/keywords? usually false
   MAX_URLS_PER_RUN: 1000,            // 0 = no limit; keep sane to avoid quotas
   CONSIDER_403_AS_FAIL: true,        // 403 often means blocked = treat as broken
@@ -164,10 +164,27 @@ function resolveUrl_(finalUrl, trackingTemplate, finalSuffix) {
 
   if (trackingTemplate) {
     let t = String(trackingTemplate);
-    t = t.replace(/\{lpurl\}/gi, encodeURIComponent(url));
-    t = t.replace(/\{ignore\}/gi, '');
-    t = t.replace(/\{[^\}]+\}/g, '');
-    url = t;
+
+    // If tracking template is just {lpurl} + params (e.g. {lpurl}?utm_source=...),
+    // skip the template entirely and just append the params directly to the final URL.
+    // This avoids the double-encoding problem where {lpurl} encodes the URL and
+    // the result gets treated as a literal string rather than a real URL.
+    const lpurlOnly = /^\{lpurl\}(\?.*)?$/i.test(t.trim());
+    if (lpurlOnly) {
+      const queryPart = t.replace(/^\{lpurl\}/i, '').replace(/\{[^\}]+\}/g, '');
+      if (queryPart) {
+        const sep = url.indexOf('?') === -1 ? '' : '&';
+        // queryPart already starts with '?' so just append with correct separator
+        url = url + (url.indexOf('?') === -1 ? queryPart : '&' + queryPart.slice(1));
+      }
+      // else template is literally just {lpurl} with no params — url stays as-is
+    } else {
+      // Full tracking template with a real redirect URL — encode and substitute normally
+      t = t.replace(/\{lpurl\}/gi, encodeURIComponent(url));
+      t = t.replace(/\{ignore\}/gi, '');
+      t = t.replace(/\{[^\}]+\}/g, '');
+      url = t;
+    }
   }
 
   if (finalSuffix) {
