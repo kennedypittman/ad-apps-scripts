@@ -18,7 +18,7 @@
 var THRESHOLD_PCT = 0.35;            // Alert if yesterday is 35%+ below the 7-day baseline
 var MIN_BASELINE_CONVERSIONS = 3;    // Skip alerting if baseline avg/day is below this (avoids noise on naturally low-volume days)
 var EMAIL_RECIPIENT = 'you@example.com'; // <-- CHANGE THIS
-var ACCOUNT_LABEL = '';              // optional, e.g. 'Telos - Enrollment' to distinguish in email subject
+var ACCOUNT_LABEL = '';              // optional 
 
 function main() {
   var account = AdsApp.currentAccount();
