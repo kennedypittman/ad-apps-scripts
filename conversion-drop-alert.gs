@@ -30,65 +30,102 @@ function main() {
   var timeZone = account.getTimeZone();
   var today = new Date();
 
-  // Baseline window: CONFIG.BASELINE_DAYS days, ending 2 days ago (keeps yesterday out of its own baseline)
-  var baselineEnd = new Date(today);
-  baselineEnd.setDate(baselineEnd.getDate() - 2);
-  var baselineStart = new Date(today);
-  baselineStart.setDate(baselineStart.getDate() - (CONFIG.BASELINE_DAYS + 1));
-  var baselineRange = {
-    min: Utilities.formatDate(baselineStart, timeZone, 'yyyyMMdd'),
-    max: Utilities.formatDate(baselineEnd, timeZone, 'yyyyMMdd')
-  };
+  var yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  var yesterdayStr = Utilities.formatDate(yesterday, timeZone, 'yyyy-MM-dd');
 
-  var campaigns = getCampaignsToCheck_();
+  var rangeStart = new Date(today);
+  rangeStart.setDate(rangeStart.getDate() - (CONFIG.BASELINE_DAYS + 1));
+  var rangeStartStr = Utilities.formatDate(rangeStart, timeZone, 'yyyy-MM-dd');
+
+  var query = buildQuery_(rangeStartStr, yesterdayStr);
+  var campaignData = fetchCampaignData_(query, yesterdayStr);
+
   var flagged = [];
-
-  for (var i = 0; i < campaigns.length; i++) {
-    var result = checkCampaign_(campaigns[i], baselineRange);
+  for (var campaignId in campaignData) {
+    var result = checkCampaign_(campaignData[campaignId]);
     if (result) flagged.push(result);
   }
 
-  Logger.log('Checked ' + campaigns.length + ' campaign(s). Flagged: ' + flagged.length + '.');
+  Logger.log('Checked ' + Object.keys(campaignData).length + ' campaign(s). Flagged: ' + flagged.length + '.');
 
   if (flagged.length > 0) {
     sendAlertEmail_(account, flagged);
   }
 }
 
-/** Build the list of campaigns to check, per CONFIG filters. */
-function getCampaignsToCheck_() {
-  var selector = AdsApp.campaigns();
+/** Build the GAQL query covering the full lookback window (baseline days + yesterday). */
+function buildQuery_(rangeStartStr, yesterdayStr) {
+  var query = "SELECT campaign.id, campaign.name, segments.date, metrics.conversions, metrics.cost_micros " +
+    "FROM campaign " +
+    "WHERE segments.date BETWEEN '" + rangeStartStr + "' AND '" + yesterdayStr + "'";
 
-  if (CONFIG.CAMPAIGN_NAME_FILTER) {
-    var safeFilter = CONFIG.CAMPAIGN_NAME_FILTER.replace(/'/g, "\\'");
-    selector = selector.withCondition("Name CONTAINS_IGNORE_CASE '" + safeFilter + "'");
-  }
+  query += CONFIG.INCLUDE_PAUSED_CAMPAIGNS
+    ? " AND campaign.status IN ('ENABLED', 'PAUSED')"
+    : " AND campaign.status = 'ENABLED'";
 
-  selector = CONFIG.INCLUDE_PAUSED_CAMPAIGNS
-    ? selector.withCondition('Status IN [ENABLED, PAUSED]')
-    : selector.withCondition('Status = ENABLED');
-
-  var out = [];
-  var it = selector.get();
-  while (it.hasNext()) out.push(it.next());
-  return out;
+  return query;
 }
 
 /**
- * Compare one campaign's yesterday vs its own 7-day baseline on two independent signals:
+ * Run the report and bucket each row into per-campaign totals:
+ * yesterday's numbers vs. the sum of everything else in the window (the baseline).
+ * Campaign name filtering happens here (case-insensitive), not in GAQL.
+ */
+function fetchCampaignData_(query, yesterdayStr) {
+  var data = {};
+  var nameFilter = CONFIG.CAMPAIGN_NAME_FILTER ? CONFIG.CAMPAIGN_NAME_FILTER.toLowerCase() : null;
+  var rows = AdsApp.report(query).rows();
+
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var name = row['campaign.name'];
+
+    if (nameFilter && name.toLowerCase().indexOf(nameFilter) === -1) {
+      continue;
+    }
+
+    var campaignId = row['campaign.id'];
+    var date = row['segments.date'];
+    var conversions = parseFloat(row['metrics.conversions']) || 0;
+    var cost = (parseFloat(row['metrics.cost_micros']) || 0) / 1000000;
+
+    if (!data[campaignId]) {
+      data[campaignId] = {
+        id: campaignId,
+        name: name,
+        yesterdayConversions: 0,
+        yesterdaySpend: 0,
+        baselineConversions: 0,
+        baselineSpend: 0
+      };
+    }
+
+    var entry = data[campaignId];
+    if (date === yesterdayStr) {
+      entry.yesterdayConversions += conversions;
+      entry.yesterdaySpend += cost;
+    } else {
+      entry.baselineConversions += conversions;
+      entry.baselineSpend += cost;
+    }
+  }
+
+  return data;
+}
+
+/**
+ * Check one campaign's yesterday vs its own baseline on two independent signals:
  *  - conversion volume (raw conversions dropped)
  *  - efficiency (cost per conversion rose)
  * Either signal on its own is enough to flag the campaign.
  * Returns a flag object, or null if neither signal crossed its threshold.
  */
-function checkCampaign_(campaign, baselineRange) {
-  var yesterdayStats = campaign.getStatsFor('YESTERDAY');
-  var yesterdayConversions = yesterdayStats.getConversions();
-  var yesterdaySpend = yesterdayStats.getCost();
-
-  var baselineStats = campaign.getStatsFor(baselineRange);
-  var baselineAvgConversions = baselineStats.getConversions() / CONFIG.BASELINE_DAYS;
-  var baselineAvgSpend = baselineStats.getCost() / CONFIG.BASELINE_DAYS;
+function checkCampaign_(entry) {
+  var yesterdayConversions = entry.yesterdayConversions;
+  var yesterdaySpend = entry.yesterdaySpend;
+  var baselineAvgConversions = entry.baselineConversions / CONFIG.BASELINE_DAYS;
+  var baselineAvgSpend = entry.baselineSpend / CONFIG.BASELINE_DAYS;
 
   // Not enough volume to judge reliably
   if (baselineAvgConversions < CONFIG.MIN_BASELINE_CONVERSIONS) {
@@ -125,8 +162,8 @@ function checkCampaign_(campaign, baselineRange) {
   }
 
   return {
-    name: campaign.getName(),
-    id: campaign.getId(),
+    name: entry.name,
+    id: entry.id,
     reasons: reasons,
     yesterdayConversions: yesterdayConversions,
     baselineAvgConversions: baselineAvgConversions,
