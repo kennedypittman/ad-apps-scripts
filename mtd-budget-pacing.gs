@@ -15,13 +15,13 @@
 
 const CONFIG = {
   // === Fill ONE of these (or both). Leave the other as null. ===
-  MONTHLY_BUDGET: 15000,   // e.g., 20000  (account currency); leave null to derive from daily
+  MONTHLY_BUDGET: 20000,   // e.g., 20000  (account currency); leave null to derive from daily
   DAILY_BUDGET: null,      // e.g., 600; leave null if you only use monthly
 
   // Optional: only count campaigns whose name contains this string (case-insensitive).
   // Set to null to count ALL campaigns in the account.
   // Example: 'Atmo' will match "Atmo_Brand", "Search_Atmo", "atmo_remarketing", etc.
-  CAMPAIGN_FILTER: null,
+  CAMPAIGN_FILTER: 'Atmo',
 
   // Pacing bands (hysteresis)
   WARN_AHEAD_PCT: 0.15,   // enter "AHEAD" at +15% vs expected
@@ -35,7 +35,7 @@ const CONFIG = {
 
   // Enforcement & notifications
   PAUSE_AT_100: false,                 // pause all campaigns at/beyond 100% of monthly cap
-  EMAILS: ['your_emails@here.com'],      // recipients
+  EMAILS: ['your.email@whatever.com'],      // recipients
 
   // Anti-spam controls
   SEND_DAILY_SUMMARY: false,           // you asked for alerts only; keep false
@@ -135,7 +135,7 @@ function main() {
   if (shouldAlert && inHours) {
     MailApp.sendEmail(
       CONFIG.EMAILS.join(','),
-      `Google Ads Budget Alert – ${severity} – ${Utilities.formatDate(now, tz, 'MMM d, HH:mm')}`,
+      `Google Ads Budget Alert – ${account.getName()} – ${severity} – ${Utilities.formatDate(now, tz, 'MMM d, HH:mm')}`,
       lines.join('\n')
     );
     state.cooldownUntil = nowMs + CONFIG.COOLDOWN_HOURS * 3600 * 1000;
@@ -151,7 +151,7 @@ function main() {
     if (hour === CONFIG.DAILY_SUMMARY_HOUR && today !== state.lastSummaryDay) {
       MailApp.sendEmail(
         CONFIG.EMAILS.join(','),
-        `Google Ads Budget Summary – ${Utilities.formatDate(now, tz, 'MMM d')}`,
+        `Google Ads Budget Alert – ${account.getName()} – ${severity} – ${Utilities.formatDate(now, tz, 'MMM d, HH:mm')}`,
         lines.join('\n')
       );
       state.lastSummaryDay = today;
