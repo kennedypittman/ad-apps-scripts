@@ -2,21 +2,16 @@
  * Google Ads Script — Keyword Performance Report
  *
  * Monthly-style report (no changes ever made to the account):
- *   1. Top 5 best-performing keywords, ranked by CPA or ROAS
- *   2. Bottom 5 worst-performing keywords, same ranking
+ *   1. Top N best-performing keywords, ranked by CPA or ROAS
+ *   2. Bottom N worst-performing keywords, same ranking
  *   3. All zero-conversion keywords above a minimum spend, with their cost
  *
- * Replaces the older "High Spend with Zero Conversions" script — this
- * report covers that same ground (see section 3) plus the performance
- * spread across the rest of your keywords.
+ * Set CFG.BREAK_OUT_BY_CAMPAIGN to true to get separate Top N / Bottom N
+ * tables per campaign instead of one combined ranking across all of them.
+ * The zero-conversion list always stays combined and sorted by spend —
+ * that section is about surfacing the single biggest wasters first, which
+ * splitting by campaign would work against.
  *
- * This script is read-only. It never pauses, edits, or removes anything.
- *
- * SETUP:
- * 1. Paste into: Tools & Settings > Bulk Actions > Scripts > + (new script)
- * 2. Update CFG.EMAILS below (and CFG.CAMPAIGN_NAME_FILTER if needed).
- * 3. Run once manually to authorize.
- * 4. Schedule it: Scripts list > this script > Schedule > Monthly.
  */
 
 const CFG = {
@@ -25,7 +20,9 @@ const CFG = {
   CONVERSION_LAG_BUFFER_DAYS: 3, // exclude the most recent N days so keywords that just haven't had time to convert yet aren't misjudged
   MIN_CONVERSIONS: 3,            // a keyword needs at least this many conversions to be eligible for the best/worst tables
   USE_ROAS: false,               // true = rank by ROAS (conversions_value / cost, higher is better). false = rank by CPA (cost / conversions, lower is better).
-  ZERO_CONV_MIN_SPEND: 20,       // only list zero-conversion keywords that spent more than this (account currency)
+  MIN_SPEND: 20,                 // applies to the whole report — a keyword must have spent more than this (account currency) to appear anywhere below, including the zero-conversion list
+  BREAK_OUT_BY_CAMPAIGN: false,  // false = one combined ranking across all matching campaigns. true = separate Top N / Bottom N per campaign.
+  TOP_N: 5,                      // how many keywords in each best/worst table. Consider a smaller number (2-3) if BREAK_OUT_BY_CAMPAIGN is true and you have several campaigns — otherwise the email gets long.
   CHECK_PAUSED: false,           // false = ENABLED campaigns/ad groups/keywords only. true = also include PAUSED.
   EMAILS: ['your.email@email.com']
 };
@@ -43,10 +40,47 @@ function main() {
   const endStr = Utilities.formatDate(endDate, tz, 'yyyy-MM-dd');
 
   const allKeywords = fetchKeywordData_(buildQuery_(startStr, endStr));
-  const keywords = filterByCampaignName_(allKeywords);
+  const nameFiltered = filterByCampaignName_(allKeywords);
 
+  // MIN_SPEND applies to the whole report — everything below (best/worst
+  // and zero-conversion alike) is drawn from this same spend-qualified pool.
+  const keywords = nameFiltered.filter(function (k) { return k.cost > CFG.MIN_SPEND; });
+
+  const zeroConv = keywords
+    .filter(function (k) { return k.conversions === 0; })
+    .sort(function (a, b) { return b.cost - a.cost; });
+
+  if (CFG.BREAK_OUT_BY_CAMPAIGN) {
+    const campaignGroups = groupByCampaign_(keywords).map(function (g) {
+      const ranked = rankKeywords_(g.keywords);
+      return {
+        campaign: g.campaign,
+        eligibleCount: ranked.eligible.length,
+        best: ranked.best,
+        worst: ranked.worst
+      };
+    });
+
+    sendReportEmailByCampaign_(account, tz, startStr, endStr, campaignGroups, zeroConv);
+
+    Logger.log('Campaigns in report: ' + campaignGroups.length +
+      ' | Spend-qualified keywords: ' + keywords.length +
+      ' | Zero-conversion: ' + zeroConv.length);
+  } else {
+    const ranked = rankKeywords_(keywords);
+
+    sendReportEmail_(account, tz, startStr, endStr, ranked.eligible.length, ranked.best, ranked.worst, zeroConv);
+
+    Logger.log('Spend-qualified keywords: ' + keywords.length +
+      ' | Eligible for best/worst: ' + ranked.eligible.length +
+      ' | Zero-conversion: ' + zeroConv.length);
+  }
+}
+
+/** Filters to eligible keywords, computes each one's ranking metric, and returns sorted best/worst slices of size CFG.TOP_N. */
+function rankKeywords_(keywords) {
   const eligible = keywords
-    .filter(function (k) { return k.conversions >= CFG.MIN_CONVERSIONS && k.cost > 0; })
+    .filter(function (k) { return k.conversions >= CFG.MIN_CONVERSIONS; })
     .map(function (k) {
       k.metric = CFG.USE_ROAS ? (k.convValue / k.cost) : (k.cost / k.conversions);
       return k;
@@ -57,18 +91,24 @@ function main() {
     return CFG.USE_ROAS ? (b.metric - a.metric) : (a.metric - b.metric);
   });
 
-  const best = eligible.slice(0, 5);
-  const worst = eligible.slice(-5).reverse();
+  return {
+    eligible: eligible,
+    best: eligible.slice(0, CFG.TOP_N),
+    worst: eligible.slice(-CFG.TOP_N).reverse()
+  };
+}
 
-  const zeroConv = keywords
-    .filter(function (k) { return k.conversions === 0 && k.cost > CFG.ZERO_CONV_MIN_SPEND; })
-    .sort(function (a, b) { return b.cost - a.cost; });
-
-  sendReportEmail_(account, tz, startStr, endStr, eligible.length, best, worst, zeroConv);
-
-  Logger.log('Keywords considered: ' + keywords.length +
-    ' | Eligible for best/worst: ' + eligible.length +
-    ' | Zero-conversion (above spend floor): ' + zeroConv.length);
+function groupByCampaign_(keywords) {
+  const groups = {};
+  keywords.forEach(function (k) {
+    if (!groups[k.campaignId]) {
+      groups[k.campaignId] = { campaignId: k.campaignId, campaign: k.campaign, keywords: [] };
+    }
+    groups[k.campaignId].keywords.push(k);
+  });
+  return Object.keys(groups)
+    .map(function (id) { return groups[id]; })
+    .sort(function (a, b) { return a.campaign.localeCompare(b.campaign); });
 }
 
 function statusCondition_(field) {
@@ -139,24 +179,23 @@ function tableHeader_(labels) {
   }).join('') + '</tr>';
 }
 
-function buildPerformanceTable_(rows, currencyCode) {
+function buildPerformanceTable_(rows, currencyCode, includeCampaignColumn) {
   if (rows.length === 0) {
     return '<p style="color:#666;">No keywords met the MIN_CONVERSIONS floor (' + CFG.MIN_CONVERSIONS + ') for this window.</p>';
   }
   const metricLabel = CFG.USE_ROAS ? 'ROAS' : 'CPA';
-  const headers = ['#', 'Keyword', 'Match', 'Campaign › Ad Group', 'Conversions', 'Cost', metricLabel];
+  const headers = ['#', 'Keyword', 'Match'];
+  if (includeCampaignColumn) headers.push('Campaign › Ad Group');
+  else headers.push('Ad Group');
+  headers.push('Conversions', 'Cost', metricLabel);
+
   let html = '<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:13px;">';
   html += tableHeader_(headers);
   rows.forEach(function (k, i) {
-    html += tableRow_([
-      i + 1,
-      escapeHtml_(k.text),
-      k.matchType,
-      escapeHtml_(k.campaign) + ' › ' + escapeHtml_(k.adgroup),
-      k.conversions.toFixed(2),
-      formatMoney_(currencyCode, k.cost),
-      formatMetric_(k, currencyCode)
-    ]);
+    const cells = [i + 1, escapeHtml_(k.text), k.matchType];
+    cells.push(includeCampaignColumn ? (escapeHtml_(k.campaign) + ' › ' + escapeHtml_(k.adgroup)) : escapeHtml_(k.adgroup));
+    cells.push(k.conversions.toFixed(2), formatMoney_(currencyCode, k.cost), formatMetric_(k, currencyCode));
+    html += tableRow_(cells);
   });
   html += '</table>';
   return html;
@@ -165,7 +204,7 @@ function buildPerformanceTable_(rows, currencyCode) {
 function buildZeroConvTable_(rows, currencyCode) {
   if (rows.length === 0) {
     return '<p style="color:#666;">No zero-conversion keywords spent more than ' +
-      formatMoney_(currencyCode, CFG.ZERO_CONV_MIN_SPEND) + '.</p>';
+      formatMoney_(currencyCode, CFG.MIN_SPEND) + '.</p>';
   }
   const headers = ['#', 'Keyword', 'Match', 'Campaign › Ad Group', 'Clicks', 'Cost'];
   let html = '<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:13px;">';
@@ -191,31 +230,69 @@ function escapeHtml_(str) {
     .replace(/>/g, '&gt;');
 }
 
-function sendReportEmail_(account, tz, startStr, endStr, eligibleCount, best, worst, zeroConv) {
-  const currencyCode = account.getCurrencyCode();
+function emailHeader_(account, currencyCode, startStr, endStr, extraLine) {
   const modeLabel = CFG.USE_ROAS ? 'ROAS' : 'CPA';
   const filterLabel = CFG.CAMPAIGN_NAME_FILTER ? ('"' + CFG.CAMPAIGN_NAME_FILTER + '"') : 'all campaigns';
 
-  let html = '<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">';
-  html += '<p><strong>Account:</strong> ' + account.getCustomerId() + ' - ' + escapeHtml_(account.getName()) + '<br>';
+  let html = '<p><strong>Account:</strong> ' + account.getCustomerId() + ' - ' + escapeHtml_(account.getName()) + '<br>';
   html += '<strong>Window:</strong> ' + startStr + ' to ' + endStr + ' (' + CFG.LOOKBACK_DAYS + 'd, ' +
     CFG.CONVERSION_LAG_BUFFER_DAYS + 'd lag buffer)<br>';
   html += '<strong>Campaign filter:</strong> ' + filterLabel + '<br>';
-  html += '<strong>Ranking by:</strong> ' + modeLabel + ' (min ' + CFG.MIN_CONVERSIONS + ' conversions to qualify, ' +
-    eligibleCount + ' keyword(s) eligible)</p>';
+  html += '<strong>Ranking by:</strong> ' + modeLabel + ' (min ' + CFG.MIN_CONVERSIONS + ' conversions to qualify)<br>';
+  html += '<strong>Min spend to appear anywhere in this report:</strong> ' + formatMoney_(currencyCode, CFG.MIN_SPEND);
+  if (extraLine) html += '<br>' + extraLine;
+  html += '</p>';
+  return html;
+}
 
-  html += '<h3>Top 5 Best Performing Keywords</h3>';
-  html += buildPerformanceTable_(best, currencyCode);
+function sendReportEmail_(account, tz, startStr, endStr, eligibleCount, best, worst, zeroConv) {
+  const currencyCode = account.getCurrencyCode();
 
-  html += '<h3 style="margin-top:24px;">Bottom 5 Worst Performing Keywords</h3>';
-  html += buildPerformanceTable_(worst, currencyCode);
+  let html = '<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">';
+  html += emailHeader_(account, currencyCode, startStr, endStr, eligibleCount + ' keyword(s) eligible for best/worst');
+
+  html += '<h3>Top ' + CFG.TOP_N + ' Best Performing Keywords</h3>';
+  html += buildPerformanceTable_(best, currencyCode, true);
+
+  html += '<h3 style="margin-top:24px;">Bottom ' + CFG.TOP_N + ' Worst Performing Keywords</h3>';
+  html += buildPerformanceTable_(worst, currencyCode, true);
 
   html += '<h3 style="margin-top:24px;">Zero-Conversion Keywords (spent over ' +
-    formatMoney_(currencyCode, CFG.ZERO_CONV_MIN_SPEND) + ')</h3>';
+    formatMoney_(currencyCode, CFG.MIN_SPEND) + ')</h3>';
   html += buildZeroConvTable_(zeroConv, currencyCode);
 
   html += '</div>';
 
+  sendHtmlEmail_(account, tz, html);
+}
+
+function sendReportEmailByCampaign_(account, tz, startStr, endStr, campaignGroups, zeroConv) {
+  const currencyCode = account.getCurrencyCode();
+
+  let html = '<div style="font-family:Arial,sans-serif;font-size:14px;color:#222;">';
+  html += emailHeader_(account, currencyCode, startStr, endStr, campaignGroups.length + ' campaign(s) in this report');
+
+  campaignGroups.forEach(function (g) {
+    html += '<h2 style="margin-top:28px;border-top:2px solid #333;padding-top:12px;">' + escapeHtml_(g.campaign) + '</h2>';
+    html += '<p style="color:#666;margin:4px 0;">' + g.eligibleCount + ' keyword(s) eligible for best/worst</p>';
+
+    html += '<h3>Top ' + CFG.TOP_N + ' Best Performing Keywords</h3>';
+    html += buildPerformanceTable_(g.best, currencyCode, false);
+
+    html += '<h3 style="margin-top:16px;">Bottom ' + CFG.TOP_N + ' Worst Performing Keywords</h3>';
+    html += buildPerformanceTable_(g.worst, currencyCode, false);
+  });
+
+  html += '<h2 style="margin-top:28px;border-top:2px solid #333;padding-top:12px;">Zero-Conversion Keywords (all campaigns, spent over ' +
+    formatMoney_(currencyCode, CFG.MIN_SPEND) + ')</h2>';
+  html += buildZeroConvTable_(zeroConv, currencyCode);
+
+  html += '</div>';
+
+  sendHtmlEmail_(account, tz, html);
+}
+
+function sendHtmlEmail_(account, tz, html) {
   const subject = 'Keyword Performance Report - ' + account.getName() + ' - ' +
     Utilities.formatDate(new Date(), tz, 'MMM d, yyyy');
   const plainFallback = 'This report contains HTML tables. Please view it in an HTML-capable email client.';
