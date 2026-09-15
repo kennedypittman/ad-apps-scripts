@@ -34,7 +34,7 @@ var CONFIG = {
   CPA_INCREASE_THRESHOLD_PCT: 0.35,    // alert if cost-per-conversion rises this much vs the baseline
   MIN_BASELINE_CONVERSIONS: 15,        // skip a campaign if its baseline avg/day is below this (avoids noise on low-volume campaigns)
   CONSECUTIVE_DAYS_REQUIRED: 2,        // require a campaign to cross the threshold this many days in a row before emailing. 1 = alert immediately (old behavior).
-  EMAILS: ['ken.pittman@atmosphere.us']          // <-- CHANGE THIS (add more addresses if needed)
+  EMAILS: ['your.email@email.com']          // <-- CHANGE THIS (add more addresses if needed)
 };
 
 function main() {
