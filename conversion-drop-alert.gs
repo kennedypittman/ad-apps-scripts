@@ -6,12 +6,23 @@
  * yesterday itself) and emails you if either conversion volume drops
  * or cost-per-conversion rises beyond the configured thresholds.
  *
+ * NOISE CONTROL: single-day comparisons are naturally volatile. To avoid
+ * emailing on every one-day blip, a campaign must cross the threshold on
+ * CONFIG.CONSECUTIVE_DAYS_REQUIRED consecutive runs before it's actually
+ * included in the email. Set that to 1 to alert immediately, same as
+ * before. This uses PropertiesService to remember streaks between runs,
+ * so it only works correctly if the script runs once per day on schedule.
+ *
  * SETUP:
  * 1. Paste this into: Tools & Settings > Bulk Actions > Scripts > + (new script)
  * 2. Update CONFIG.EMAILS below (and CAMPAIGN_NAME_FILTER if needed).
  * 3. Run once manually to authorize (Google Ads will prompt for permissions).
  * 4. Schedule it: Scripts list > this script > Schedule > Daily, ideally
  *    mid-morning (e.g. 8-10am) to give conversion data time to settle.
+ *
+ * NOTE: if you raise CONSECUTIVE_DAYS_REQUIRED above 1, an issue that's
+ * already ongoing won't email you until it's been flagged that many runs
+ * in a row (e.g. with a value of 2, you'll see it on the 2nd day, not the 1st).
  */
 
 // ===== CONFIG =====
@@ -21,8 +32,9 @@ var CONFIG = {
   BASELINE_DAYS: 7,                    // how many days to average for the "normal" baseline
   CONVERSION_DROP_THRESHOLD_PCT: 0.35, // alert if conversions drop this much vs the baseline
   CPA_INCREASE_THRESHOLD_PCT: 0.35,    // alert if cost-per-conversion rises this much vs the baseline
-  MIN_BASELINE_CONVERSIONS: 3,         // skip a campaign if its baseline avg/day is below this (avoids noise on low-volume campaigns)
-  EMAILS: ['you@example.com']          // <-- CHANGE THIS (add more addresses if needed)
+  MIN_BASELINE_CONVERSIONS: 15,        // skip a campaign if its baseline avg/day is below this (avoids noise on low-volume campaigns)
+  CONSECUTIVE_DAYS_REQUIRED: 2,        // require a campaign to cross the threshold this many days in a row before emailing. 1 = alert immediately (old behavior).
+  EMAILS: ['ken.pittman@atmosphere.us']          // <-- CHANGE THIS (add more addresses if needed)
 };
 
 function main() {
@@ -41,13 +53,16 @@ function main() {
   var query = buildQuery_(rangeStartStr, yesterdayStr);
   var campaignData = fetchCampaignData_(query, yesterdayStr);
 
-  var flagged = [];
+  var candidates = [];
   for (var campaignId in campaignData) {
     var result = checkCampaign_(campaignData[campaignId]);
-    if (result) flagged.push(result);
+    if (result) candidates.push(result);
   }
 
-  Logger.log('Checked ' + Object.keys(campaignData).length + ' campaign(s). Flagged: ' + flagged.length + '.');
+  var flagged = applyConsecutiveDayFilter_(candidates, yesterdayStr);
+
+  Logger.log('Checked ' + Object.keys(campaignData).length + ' campaign(s). Candidates: ' +
+    candidates.length + '. Alerting on: ' + flagged.length + '.');
 
   if (flagged.length > 0) {
     sendAlertEmail_(account, flagged);
@@ -119,13 +134,19 @@ function fetchCampaignData_(query, yesterdayStr) {
  *  - conversion volume (raw conversions dropped)
  *  - efficiency (cost per conversion rose)
  * Either signal on its own is enough to flag the campaign.
- * Returns a flag object, or null if neither signal crossed its threshold.
+ * Returns a flag object (a "candidate" — still subject to the consecutive-day
+ * filter in applyConsecutiveDayFilter_), or null if neither signal crossed
+ * its threshold.
  */
 function checkCampaign_(entry) {
   var yesterdayConversions = entry.yesterdayConversions;
   var yesterdaySpend = entry.yesterdaySpend;
   var baselineAvgConversions = entry.baselineConversions / CONFIG.BASELINE_DAYS;
   var baselineAvgSpend = entry.baselineSpend / CONFIG.BASELINE_DAYS;
+  var yesterdayCPA = yesterdayConversions > 0 ? yesterdaySpend / yesterdayConversions : null;
+  var baselineCPA = (baselineAvgConversions > 0 && baselineAvgSpend > 0)
+    ? baselineAvgSpend / baselineAvgConversions
+    : null;
 
   // Not enough volume to judge reliably
   if (baselineAvgConversions < CONFIG.MIN_BASELINE_CONVERSIONS) {
@@ -141,12 +162,9 @@ function checkCampaign_(entry) {
   }
 
   // Signal 2: cost per conversion rose (unit economics got worse), independent of volume
-  var baselineCPA = baselineAvgSpend > 0 ? baselineAvgSpend / baselineAvgConversions : null;
   var cpaIncreasePct = null;
-
   if (baselineCPA) {
     if (yesterdayConversions > 0) {
-      var yesterdayCPA = yesterdaySpend / yesterdayConversions;
       cpaIncreasePct = (yesterdayCPA - baselineCPA) / baselineCPA;
       if (cpaIncreasePct >= CONFIG.CPA_INCREASE_THRESHOLD_PCT) {
         reasons.push('CPA increase');
@@ -162,17 +180,62 @@ function checkCampaign_(entry) {
   }
 
   return {
-    name: entry.name,
     id: entry.id,
+    name: entry.name,
     reasons: reasons,
     yesterdayConversions: yesterdayConversions,
     baselineAvgConversions: baselineAvgConversions,
     conversionDropPct: conversionDropPct * 100,
     yesterdaySpend: yesterdaySpend,
     baselineAvgSpend: baselineAvgSpend,
+    yesterdayCPA: yesterdayCPA,
     baselineCPA: baselineCPA,
     cpaIncreasePct: cpaIncreasePct !== null ? cpaIncreasePct * 100 : null
   };
+}
+
+/**
+ * Only let a candidate through to the email once it's crossed the threshold
+ * on CONFIG.CONSECUTIVE_DAYS_REQUIRED consecutive daily runs. Streak state is
+ * stored in Script Properties, keyed by campaign ID, and reset for any
+ * campaign that isn't a candidate today (or whose last flagged day wasn't
+ * literally the day before yesterday — e.g. the script missed a scheduled run).
+ */
+function applyConsecutiveDayFilter_(candidates, yesterdayStr) {
+  if (CONFIG.CONSECUTIVE_DAYS_REQUIRED <= 1) {
+    return candidates;
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  var stored = props.getProperty('flagTracking');
+  var tracking = stored ? JSON.parse(stored) : {};
+
+  var newTracking = {};
+  var toAlert = [];
+
+  candidates.forEach(function (c) {
+    var prev = tracking[c.id];
+    var streak = 1;
+    if (prev && isDayBefore_(prev.lastFlaggedDate, yesterdayStr)) {
+      streak = prev.streak + 1;
+    }
+    newTracking[c.id] = { streak: streak, lastFlaggedDate: yesterdayStr };
+    c.streak = streak;
+    if (streak >= CONFIG.CONSECUTIVE_DAYS_REQUIRED) {
+      toAlert.push(c);
+    }
+  });
+
+  props.setProperty('flagTracking', JSON.stringify(newTracking));
+  return toAlert;
+}
+
+/** True if dateStr is exactly one calendar day before referenceDateStr (both 'yyyy-MM-dd'). */
+function isDayBefore_(dateStr, referenceDateStr) {
+  var d = new Date(dateStr + 'T00:00:00');
+  var ref = new Date(referenceDateStr + 'T00:00:00');
+  var diffDays = Math.round((ref - d) / 86400000);
+  return diffDays === 1;
 }
 
 function sendAlertEmail_(account, flagged) {
@@ -185,13 +248,16 @@ function sendAlertEmail_(account, flagged) {
   flagged.forEach(function (f) {
     lines.push(f.name + ' (ID ' + f.id + ')');
     lines.push('  Triggered by: ' + f.reasons.join(', '));
-    lines.push('  Yesterday: ' + f.yesterdayConversions.toFixed(2) + ' conversions, $' + f.yesterdaySpend.toFixed(2) + ' spend');
-    lines.push('  ' + CONFIG.BASELINE_DAYS + '-day baseline: ' + f.baselineAvgConversions.toFixed(2) + ' conversions/day, $' + f.baselineAvgSpend.toFixed(2) + '/day spend');
-    lines.push('  Conversion drop: ' + f.conversionDropPct.toFixed(1) + '%');
-    if (f.baselineCPA) {
-      lines.push('  Baseline CPA: $' + f.baselineCPA.toFixed(2));
-      lines.push('  CPA change: ' + (f.cpaIncreasePct !== null ? f.cpaIncreasePct.toFixed(1) + '%' : 'n/a (zero conversions yesterday)'));
+    if (CONFIG.CONSECUTIVE_DAYS_REQUIRED > 1) {
+      lines.push('  Flagged for: ' + f.streak + ' consecutive day(s)');
     }
+    lines.push('  Conversions — yesterday: ' + f.yesterdayConversions.toFixed(2) +
+      ' | baseline: ' + f.baselineAvgConversions.toFixed(2) + '/day (' + f.conversionDropPct.toFixed(1) + '% drop)');
+    lines.push('  Spend — yesterday: $' + f.yesterdaySpend.toFixed(2) +
+      ' | baseline: $' + f.baselineAvgSpend.toFixed(2) + '/day');
+    lines.push('  CPA — yesterday: ' + (f.yesterdayCPA !== null ? '$' + f.yesterdayCPA.toFixed(2) : 'n/a (zero conversions)') +
+      ' | baseline: ' + (f.baselineCPA !== null ? '$' + f.baselineCPA.toFixed(2) : 'n/a') +
+      (f.cpaIncreasePct !== null ? ' (' + (f.cpaIncreasePct >= 0 ? '+' : '') + f.cpaIncreasePct.toFixed(1) + '%)' : ''));
     lines.push('');
   });
 
